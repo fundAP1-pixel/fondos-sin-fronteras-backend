@@ -167,3 +167,84 @@ app.get('/api/proyectos/:id/pdf', requireAuth, asyncRoute(async (req, res) => {
 
   let convocatoriaNombre = null;
   if (proyecto.convocatoria_id) {
+    const c = await pool.query('SELECT nombre FROM convocatorias WHERE id = $1', [proyecto.convocatoria_id]);
+    convocatoriaNombre = c.rows[0] ? c.rows[0].nombre : null;
+  }
+  streamProjectPDF(res, { ...proyecto, convocatoria_nombre: convocatoriaNombre }, org);
+}));
+
+app.get('/api/notificaciones', requireAuth, asyncRoute(async (req, res) => {
+  const result = await pool.query('SELECT * FROM notificaciones WHERE organizacion_id = $1 ORDER BY creado_en DESC LIMIT 30', [req.user.org]);
+  res.json(result.rows);
+}));
+app.post('/api/notificaciones/:id/leida', requireAuth, asyncRoute(async (req, res) => {
+  await pool.query('UPDATE notificaciones SET leida = 1 WHERE id = $1 AND organizacion_id = $2', [req.params.id, req.user.org]);
+  res.json({ ok: true });
+}));
+
+app.get('/api/suscripcion', requireAuth, asyncRoute(async (req, res) => {
+  await checkExpirations();
+  const result = await pool.query(
+    'SELECT plan, estado_suscripcion, suscripcion_inicio, suscripcion_fin FROM organizaciones WHERE id = $1',
+    [req.user.org]
+  );
+  res.json(result.rows[0]);
+}));
+
+app.get('/api/transacciones', requireAuth, asyncRoute(async (req, res) => {
+  const result = await pool.query('SELECT * FROM transacciones WHERE organizacion_id = $1 ORDER BY creado_en DESC LIMIT 30', [req.user.org]);
+  res.json(result.rows);
+}));
+
+app.post('/api/pagos/iniciar', requireAuth, asyncRoute(async (req, res) => {
+  const { plan, metodo } = req.body || {};
+  if (!PLAN_PRICES[plan]) return res.status(400).json({ error: 'Plan inválido.' });
+  if (!['paypal', 'nequi', 'pse', 'transferencia'].includes(metodo)) return res.status(400).json({ error: 'Método de pago inválido.' });
+
+  const referencia = crypto.randomUUID();
+  await pool.query(
+    `INSERT INTO transacciones (organizacion_id, plan, monto, metodo, estado, referencia_externa)
+     VALUES ($1, $2, $3, $4, 'pendiente', $5)`,
+    [req.user.org, plan, String(PLAN_PRICES[plan]), metodo, referencia]
+  );
+
+  if (metodo === 'transferencia' || metodo === 'nequi') {
+    await markPending(req.user.org, plan);
+  }
+
+  res.json({ referencia, monto: PLAN_PRICES[plan], plan, metodo, estado: 'pendiente' });
+}));
+
+app.post('/api/pagos/webhook/paypal', express.json({ type: '*/*' }), (req, res) => {
+  const evento = req.body;
+  console.log('[webhook paypal] evento recibido:', JSON.stringify(evento).slice(0, 300));
+  res.status(200).json({ recibido: true });
+});
+
+app.post('/api/pagos/confirmar', requireAuth, asyncRoute(async (req, res) => {
+  const { plan } = req.body || {};
+  if (!PLAN_PRICES[plan]) return res.status(400).json({ error: 'Plan inválido.' });
+  const resultado = await activateOrganization(req.user.org, plan);
+  await pool.query(
+    `UPDATE transacciones SET estado = 'confirmada' WHERE organizacion_id = $1 AND plan = $2 AND estado = 'pendiente'`,
+    [req.user.org, plan]
+  );
+  res.json(resultado);
+}));
+
+const PORT = process.env.PORT || 4000;
+
+initDb()
+  .then(async () => {
+    await checkExpirations();
+    setInterval(checkExpirations, 60 * 1000);
+    app.listen(PORT, () => {
+      console.log(`Fondos Sin Fronteras AI API escuchando en http://localhost:${PORT}`);
+    });
+  })
+  .catch(err => {
+    console.error('Error inicializando la base de datos:', err);
+    process.exit(1);
+  });
+
+module.exports = app;
