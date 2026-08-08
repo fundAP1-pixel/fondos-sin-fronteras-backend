@@ -1,0 +1,23 @@
+{
+  "name": "fondos-sin-fronteras-ai-backend",
+  "version": "1.0.0",
+  "description": "Backend real de Fondos Sin Fronteras AI: API, base de datos, autenticación, PDF y suscripciones.",
+  "main": "src/server.js",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "pg": "^8.11.3",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "pdfkit": "^0.19.1"
+  }
+}
