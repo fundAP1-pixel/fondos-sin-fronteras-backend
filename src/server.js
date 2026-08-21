@@ -1,10 +1,10 @@
-// server.js — Fondos Sin Fronteras AI · Backend real
+// server.js — Fondos Sin Fronteras AI · Backend real (PostgreSQL)
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const crypto = require('node:crypto');
 
-const { db, bcrypt } = require('./db');
+const { pool, bcrypt, initDb } = require('./db');
 const { signToken, requireAuth } = require('./auth');
 const { activateOrganization, checkExpirations, markPending } = require('./subscriptions');
 const { getClient, extraerTexto, parsearJSON, ANTHROPIC_MODEL } = require('./claude');
@@ -16,6 +16,15 @@ app.use(express.json());
 
 const PLAN_PRICES = { COOP: 97, PRO: 780, GOLD: 1550 };
 
+// Convierte una fila de convocatoria (requisitos/documentos guardados como texto JSON) a objeto listo para el frontend.
+function parseConvocatoria(r) {
+  return {
+    ...r,
+    requisitos: JSON.parse(r.requisitos || '[]'),
+    documentos: JSON.parse(r.documentos || '[]'),
+  };
+}
+
 // =====================================================================
 // Salud del servicio
 // =====================================================================
@@ -24,7 +33,7 @@ app.get('/api/health', (req, res) => {
 });
 
 // =====================================================================
-// SORY — chat real con Claude (antes simulado en el navegador)
+// SORY — chat real con Claude (no toca la base de datos)
 // =====================================================================
 app.post('/api/sory/chat', requireAuth, async (req, res) => {
   const { mensaje, historial } = req.body || {};
@@ -60,7 +69,7 @@ app.post('/api/sory/chat', requireAuth, async (req, res) => {
 });
 
 // =====================================================================
-// Búsqueda de convocatorias en tiempo real con IA + búsqueda web
+// Búsqueda de convocatorias en tiempo real con IA + búsqueda web (no toca la base de datos)
 // =====================================================================
 app.post('/api/convocatorias/buscar-ia', requireAuth, async (req, res) => {
   const { consulta } = req.body || {};
@@ -103,183 +112,317 @@ app.post('/api/convocatorias/buscar-ia', requireAuth, async (req, res) => {
 // =====================================================================
 // Autenticación
 // =====================================================================
-app.post('/api/auth/registro', (req, res) => {
+app.post('/api/auth/registro', async (req, res) => {
   const { nombreOrganizacion, pais, sector, nombreUsuario, email, password } = req.body || {};
   if (!nombreOrganizacion || !email || !password || password.length < 8) {
     return res.status(400).json({ error: 'Faltan campos requeridos o la contraseña tiene menos de 8 caracteres.' });
   }
-  const existente = db.prepare('SELECT id FROM usuarios WHERE email = ?').get(email);
-  if (existente) return res.status(409).json({ error: 'Ya existe una cuenta con ese correo.' });
+  try {
+    const existente = await pool.query('SELECT id FROM usuarios WHERE email = $1', [email]);
+    if (existente.rows.length > 0) {
+      return res.status(409).json({ error: 'Ya existe una cuenta con ese correo.' });
+    }
 
-  const org = db.prepare(`INSERT INTO organizaciones (nombre, pais, sector) VALUES (?, ?, ?)`)
-    .run(nombreOrganizacion, pais || 'Colombia', sector || null);
+    const orgResult = await pool.query(
+      'INSERT INTO organizaciones (nombre, pais, sector) VALUES ($1, $2, $3) RETURNING id',
+      [nombreOrganizacion, pais || 'Colombia', sector || null]
+    );
+    const orgId = orgResult.rows[0].id;
 
-  const hash = bcrypt.hashSync(password, 10);
-  const user = db.prepare(`
-    INSERT INTO usuarios (organizacion_id, nombre, email, password_hash, rol) VALUES (?, ?, ?, ?, 'administrador')
-  `).run(org.lastInsertRowid, nombreUsuario || 'Administrador', email, hash);
+    const hash = bcrypt.hashSync(password, 10);
+    const userResult = await pool.query(
+      `INSERT INTO usuarios (organizacion_id, nombre, email, password_hash, rol)
+       VALUES ($1, $2, $3, $4, 'administrador') RETURNING id`,
+      [orgId, nombreUsuario || 'Administrador', email, hash]
+    );
+    const userId = userResult.rows[0].id;
 
-  const usuario = { id: user.lastInsertRowid, organizacion_id: org.lastInsertRowid, rol: 'administrador', email };
-  const token = signToken(usuario);
-  res.status(201).json({ token, organizacionId: org.lastInsertRowid, usuarioId: user.lastInsertRowid });
+    const usuario = { id: userId, organizacion_id: orgId, rol: 'administrador', email };
+    const token = signToken(usuario);
+    res.status(201).json({ token, organizacionId: orgId, usuarioId: userId });
+  } catch (err) {
+    console.error('[auth/registro] error:', err);
+    res.status(500).json({ error: err.message || 'Error al registrar la organización.' });
+  }
 });
 
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   const { email, password } = req.body || {};
-  const usuario = db.prepare('SELECT * FROM usuarios WHERE email = ?').get(email);
-  if (!usuario || !bcrypt.compareSync(password || '', usuario.password_hash)) {
-    return res.status(401).json({ error: 'Correo o contraseña incorrectos.' });
+  try {
+    const { rows } = await pool.query('SELECT * FROM usuarios WHERE email = $1', [email]);
+    const usuario = rows[0];
+    if (!usuario || !bcrypt.compareSync(password || '', usuario.password_hash)) {
+      return res.status(401).json({ error: 'Correo o contraseña incorrectos.' });
+    }
+    const token = signToken(usuario);
+    res.json({ token, organizacionId: usuario.organizacion_id, usuarioId: usuario.id });
+  } catch (err) {
+    console.error('[auth/login] error:', err);
+    res.status(500).json({ error: err.message || 'Error al iniciar sesión.' });
   }
-  const token = signToken(usuario);
-  res.json({ token, organizacionId: usuario.organizacion_id, usuarioId: usuario.id });
 });
 
 // =====================================================================
 // Organización / perfil propio
 // =====================================================================
-app.get('/api/organizaciones/me', requireAuth, (req, res) => {
-  const org = db.prepare('SELECT * FROM organizaciones WHERE id = ?').get(req.user.org);
-  if (!org) return res.status(404).json({ error: 'Organización no encontrada.' });
-  res.json(org);
+app.get('/api/organizaciones/me', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM organizaciones WHERE id = $1', [req.user.org]);
+    if (!rows[0]) return res.status(404).json({ error: 'Organización no encontrada.' });
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[organizaciones/me] error:', err);
+    res.status(500).json({ error: err.message || 'Error al obtener la organización.' });
+  }
 });
 
 // =====================================================================
 // Convocatorias
 // =====================================================================
-app.get('/api/convocatorias', (req, res) => {
-  const rows = db.prepare("SELECT * FROM convocatorias WHERE estado_verificacion != 'retirada' ORDER BY fecha_cierre ASC").all();
-  const parsed = rows.map(r => ({
-    ...r,
-    requisitos: JSON.parse(r.requisitos || '[]'),
-    documentos: JSON.parse(r.documentos || '[]'),
-  }));
-  res.json(parsed);
+app.get('/api/convocatorias', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT * FROM convocatorias WHERE estado_verificacion != 'retirada' ORDER BY fecha_cierre ASC"
+    );
+    res.json(rows.map(parseConvocatoria));
+  } catch (err) {
+    console.error('[convocatorias] error:', err);
+    res.status(500).json({ error: err.message || 'Error al listar convocatorias.' });
+  }
 });
 
-app.get('/api/convocatorias/:id', (req, res) => {
-  const r = db.prepare('SELECT * FROM convocatorias WHERE id = ?').get(req.params.id);
-  if (!r) return res.status(404).json({ error: 'Convocatoria no encontrada.' });
-  res.json({ ...r, requisitos: JSON.parse(r.requisitos || '[]'), documentos: JSON.parse(r.documentos || '[]') });
+app.get('/api/convocatorias/:id', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT * FROM convocatorias WHERE id = $1', [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Convocatoria no encontrada.' });
+    res.json(parseConvocatoria(rows[0]));
+  } catch (err) {
+    console.error('[convocatorias/:id] error:', err);
+    res.status(500).json({ error: err.message || 'Error al obtener la convocatoria.' });
+  }
 });
 
-app.post('/api/convocatorias/:id/reportes', requireAuth, (req, res) => {
-  const conv = db.prepare('SELECT id FROM convocatorias WHERE id = ?').get(req.params.id);
-  if (!conv) return res.status(404).json({ error: 'Convocatoria no encontrada.' });
-  db.prepare("UPDATE convocatorias SET estado_verificacion = 'en_revision' WHERE id = ?").run(req.params.id);
-  res.json({ ok: true, mensaje: 'Reporte recibido. La convocatoria queda en revisión.' });
+app.post('/api/convocatorias/:id/reportes', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT id FROM convocatorias WHERE id = $1', [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Convocatoria no encontrada.' });
+    await pool.query("UPDATE convocatorias SET estado_verificacion = 'en_revision' WHERE id = $1", [req.params.id]);
+    res.json({ ok: true, mensaje: 'Reporte recibido. La convocatoria queda en revisión.' });
+  } catch (err) {
+    console.error('[convocatorias/:id/reportes] error:', err);
+    res.status(500).json({ error: err.message || 'Error al registrar el reporte.' });
+  }
 });
 
 // ---- Favoritas ----
-app.post('/api/convocatorias/:id/favorito', requireAuth, (req, res) => {
-  db.prepare('INSERT OR IGNORE INTO favoritos (usuario_id, convocatoria_id) VALUES (?, ?)')
-    .run(req.user.sub, req.params.id);
-  res.json({ ok: true, favorito: true });
+app.post('/api/convocatorias/:id/favorito', requireAuth, async (req, res) => {
+  try {
+    await pool.query(
+      'INSERT INTO favoritos (usuario_id, convocatoria_id) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+      [req.user.sub, req.params.id]
+    );
+    res.json({ ok: true, favorito: true });
+  } catch (err) {
+    console.error('[favorito POST] error:', err);
+    res.status(500).json({ error: err.message || 'Error al marcar como favorita.' });
+  }
 });
-app.delete('/api/convocatorias/:id/favorito', requireAuth, (req, res) => {
-  db.prepare('DELETE FROM favoritos WHERE usuario_id = ? AND convocatoria_id = ?').run(req.user.sub, req.params.id);
-  res.json({ ok: true, favorito: false });
+app.delete('/api/convocatorias/:id/favorito', requireAuth, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM favoritos WHERE usuario_id = $1 AND convocatoria_id = $2', [req.user.sub, req.params.id]);
+    res.json({ ok: true, favorito: false });
+  } catch (err) {
+    console.error('[favorito DELETE] error:', err);
+    res.status(500).json({ error: err.message || 'Error al quitar de favoritas.' });
+  }
 });
-app.get('/api/favoritos', requireAuth, (req, res) => {
-  const rows = db.prepare(`
-    SELECT c.* FROM favoritos f JOIN convocatorias c ON c.id = f.convocatoria_id WHERE f.usuario_id = ?
-  `).all(req.user.sub);
-  res.json(rows.map(r => ({ ...r, requisitos: JSON.parse(r.requisitos || '[]'), documentos: JSON.parse(r.documentos || '[]') })));
+app.get('/api/favoritos', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT c.* FROM favoritos f JOIN convocatorias c ON c.id = f.convocatoria_id WHERE f.usuario_id = $1`,
+      [req.user.sub]
+    );
+    res.json(rows.map(parseConvocatoria));
+  } catch (err) {
+    console.error('[favoritos] error:', err);
+    res.status(500).json({ error: err.message || 'Error al listar favoritas.' });
+  }
 });
 
 // =====================================================================
 // Proyectos (Constructor Inteligente)
 // =====================================================================
-app.post('/api/proyectos', requireAuth, (req, res) => {
+app.post('/api/proyectos', requireAuth, async (req, res) => {
   const { titulo, convocatoriaId, diagnostico, objetivoGeneral, objetivosEspecificos, resultados, presupuesto, cronograma } = req.body || {};
   if (!titulo) return res.status(400).json({ error: 'El proyecto necesita un título.' });
-  const info = db.prepare(`
-    INSERT INTO proyectos (organizacion_id, convocatoria_id, titulo, diagnostico, objetivo_general, objetivos_especificos, resultados, presupuesto, cronograma)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(
-    req.user.org, convocatoriaId || null, titulo, diagnostico || '', objetivoGeneral || '',
-    JSON.stringify(objetivosEspecificos || []), JSON.stringify(resultados || []),
-    JSON.stringify(presupuesto || []), JSON.stringify(cronograma || [])
-  );
-  res.status(201).json({ id: info.lastInsertRowid });
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO proyectos
+        (organizacion_id, convocatoria_id, titulo, diagnostico, objetivo_general, objetivos_especificos, resultados, presupuesto, cronograma)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id`,
+      [
+        req.user.org, convocatoriaId || null, titulo, diagnostico || '', objetivoGeneral || '',
+        JSON.stringify(objetivosEspecificos || []), JSON.stringify(resultados || []),
+        JSON.stringify(presupuesto || []), JSON.stringify(cronograma || []),
+      ]
+    );
+    res.status(201).json({ id: rows[0].id });
+  } catch (err) {
+    console.error('[proyectos POST] error:', err);
+    res.status(500).json({ error: err.message || 'Error al crear el proyecto.' });
+  }
 });
 
-app.get('/api/proyectos', requireAuth, (req, res) => {
-  const rows = db.prepare('SELECT * FROM proyectos WHERE organizacion_id = ? ORDER BY actualizado_en DESC').all(req.user.org);
-  res.json(rows);
+app.get('/api/proyectos', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM proyectos WHERE organizacion_id = $1 ORDER BY actualizado_en DESC',
+      [req.user.org]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('[proyectos GET] error:', err);
+    res.status(500).json({ error: err.message || 'Error al listar proyectos.' });
+  }
 });
 
-app.patch('/api/proyectos/:id', requireAuth, (req, res) => {
-  const proyecto = db.prepare('SELECT * FROM proyectos WHERE id = ? AND organizacion_id = ?').get(req.params.id, req.user.org);
-  if (!proyecto) return res.status(404).json({ error: 'Proyecto no encontrado.' });
-  const campos = ['titulo', 'diagnostico', 'objetivo_general', 'estado'];
-  const sets = [];
-  const vals = [];
-  for (const c of campos) {
-    if (req.body[c] !== undefined) { sets.push(`${c} = ?`); vals.push(req.body[c]); }
+app.patch('/api/proyectos/:id', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM proyectos WHERE id = $1 AND organizacion_id = $2',
+      [req.params.id, req.user.org]
+    );
+    if (!rows[0]) return res.status(404).json({ error: 'Proyecto no encontrado.' });
+
+    const camposSimples = ['titulo', 'diagnostico', 'objetivo_general', 'estado'];
+    const camposJson = ['objetivos_especificos', 'resultados', 'presupuesto', 'cronograma'];
+    const sets = [];
+    const vals = [];
+    let i = 1;
+
+    for (const c of camposSimples) {
+      if (req.body[c] !== undefined) { sets.push(`${c} = $${i++}`); vals.push(req.body[c]); }
+    }
+    for (const c of camposJson) {
+      if (req.body[c] !== undefined) { sets.push(`${c} = $${i++}`); vals.push(JSON.stringify(req.body[c])); }
+    }
+    sets.push(`actualizado_en = now()`);
+    vals.push(req.params.id);
+
+    await pool.query(`UPDATE proyectos SET ${sets.join(', ')} WHERE id = $${i}`, vals);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[proyectos PATCH] error:', err);
+    res.status(500).json({ error: err.message || 'Error al actualizar el proyecto.' });
   }
-  for (const jsonField of ['objetivos_especificos', 'resultados', 'presupuesto', 'cronograma']) {
-    if (req.body[jsonField] !== undefined) { sets.push(`${jsonField} = ?`); vals.push(JSON.stringify(req.body[jsonField])); }
-  }
-  sets.push("actualizado_en = datetime('now')");
-  vals.push(req.params.id);
-  db.prepare(`UPDATE proyectos SET ${sets.join(', ')} WHERE id = ?`).run(...vals);
-  res.json({ ok: true });
 });
 
-app.get('/api/proyectos/:id/pdf', requireAuth, (req, res) => {
-  const proyecto = db.prepare('SELECT * FROM proyectos WHERE id = ? AND organizacion_id = ?').get(req.params.id, req.user.org);
-  if (!proyecto) return res.status(404).json({ error: 'Proyecto no encontrado.' });
-  const org = db.prepare('SELECT * FROM organizaciones WHERE id = ?').get(req.user.org);
-  let convocatoriaNombre = null;
-  if (proyecto.convocatoria_id) {
-    const c = db.prepare('SELECT nombre FROM convocatorias WHERE id = ?').get(proyecto.convocatoria_id);
-    convocatoriaNombre = c ? c.nombre : null;
+app.get('/api/proyectos/:id/pdf', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM proyectos WHERE id = $1 AND organizacion_id = $2',
+      [req.params.id, req.user.org]
+    );
+    const proyecto = rows[0];
+    if (!proyecto) return res.status(404).json({ error: 'Proyecto no encontrado.' });
+
+    const { rows: orgRows } = await pool.query('SELECT * FROM organizaciones WHERE id = $1', [req.user.org]);
+    const org = orgRows[0];
+
+    let convocatoriaNombre = null;
+    if (proyecto.convocatoria_id) {
+      const { rows: convRows } = await pool.query('SELECT nombre FROM convocatorias WHERE id = $1', [proyecto.convocatoria_id]);
+      convocatoriaNombre = convRows[0] ? convRows[0].nombre : null;
+    }
+
+    streamProjectPDF(res, { ...proyecto, convocatoria_nombre: convocatoriaNombre }, org);
+  } catch (err) {
+    console.error('[proyectos/:id/pdf] error:', err);
+    res.status(500).json({ error: err.message || 'Error al generar el PDF.' });
   }
-  streamProjectPDF(res, { ...proyecto, convocatoria_nombre: convocatoriaNombre }, org);
 });
 
 // =====================================================================
 // Notificaciones
 // =====================================================================
-app.get('/api/notificaciones', requireAuth, (req, res) => {
-  const rows = db.prepare('SELECT * FROM notificaciones WHERE organizacion_id = ? ORDER BY creado_en DESC LIMIT 30').all(req.user.org);
-  res.json(rows);
+app.get('/api/notificaciones', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM notificaciones WHERE organizacion_id = $1 ORDER BY creado_en DESC LIMIT 30',
+      [req.user.org]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('[notificaciones] error:', err);
+    res.status(500).json({ error: err.message || 'Error al listar notificaciones.' });
+  }
 });
-app.post('/api/notificaciones/:id/leida', requireAuth, (req, res) => {
-  db.prepare('UPDATE notificaciones SET leida = 1 WHERE id = ? AND organizacion_id = ?').run(req.params.id, req.user.org);
-  res.json({ ok: true });
+app.post('/api/notificaciones/:id/leida', requireAuth, async (req, res) => {
+  try {
+    await pool.query(
+      'UPDATE notificaciones SET leida = 1 WHERE id = $1 AND organizacion_id = $2',
+      [req.params.id, req.user.org]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[notificaciones/:id/leida] error:', err);
+    res.status(500).json({ error: err.message || 'Error al marcar como leída.' });
+  }
 });
 
 // =====================================================================
 // Suscripción y pagos
 // =====================================================================
-app.get('/api/suscripcion', requireAuth, (req, res) => {
-  checkExpirations();
-  const org = db.prepare('SELECT plan, estado_suscripcion, suscripcion_inicio, suscripcion_fin FROM organizaciones WHERE id = ?').get(req.user.org);
-  res.json(org);
+app.get('/api/suscripcion', requireAuth, async (req, res) => {
+  try {
+    await checkExpirations();
+    const { rows } = await pool.query(
+      'SELECT plan, estado_suscripcion, suscripcion_inicio, suscripcion_fin FROM organizaciones WHERE id = $1',
+      [req.user.org]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    console.error('[suscripcion] error:', err);
+    res.status(500).json({ error: err.message || 'Error al obtener la suscripción.' });
+  }
 });
 
-app.get('/api/transacciones', requireAuth, (req, res) => {
-  const rows = db.prepare('SELECT * FROM transacciones WHERE organizacion_id = ? ORDER BY creado_en DESC LIMIT 30').all(req.user.org);
-  res.json(rows);
+app.get('/api/transacciones', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM transacciones WHERE organizacion_id = $1 ORDER BY creado_en DESC LIMIT 30',
+      [req.user.org]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('[transacciones] error:', err);
+    res.status(500).json({ error: err.message || 'Error al listar transacciones.' });
+  }
 });
 
-app.post('/api/pagos/iniciar', requireAuth, (req, res) => {
+app.post('/api/pagos/iniciar', requireAuth, async (req, res) => {
   const { plan, metodo } = req.body || {};
   if (!PLAN_PRICES[plan]) return res.status(400).json({ error: 'Plan inválido.' });
-  if (!['paypal', 'nequi', 'pse', 'transferencia'].includes(metodo)) return res.status(400).json({ error: 'Método de pago inválido.' });
-
-  const referencia = crypto.randomUUID();
-  db.prepare(`
-    INSERT INTO transacciones (organizacion_id, plan, monto, metodo, estado, referencia_externa)
-    VALUES (?, ?, ?, ?, 'pendiente', ?)
-  `).run(req.user.org, plan, String(PLAN_PRICES[plan]), metodo, referencia);
-
-  if (metodo === 'transferencia' || metodo === 'nequi') {
-    markPending(req.user.org, plan);
+  if (!['paypal', 'nequi', 'pse', 'transferencia'].includes(metodo)) {
+    return res.status(400).json({ error: 'Método de pago inválido.' });
   }
+  try {
+    const referencia = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO transacciones (organizacion_id, plan, monto, metodo, estado, referencia_externa)
+       VALUES ($1, $2, $3, $4, 'pendiente', $5)`,
+      [req.user.org, plan, String(PLAN_PRICES[plan]), metodo, referencia]
+    );
 
-  res.json({ referencia, monto: PLAN_PRICES[plan], plan, metodo, estado: 'pendiente' });
+    if (metodo === 'transferencia' || metodo === 'nequi') {
+      await markPending(req.user.org, plan);
+    }
+
+    res.json({ referencia, monto: PLAN_PRICES[plan], plan, metodo, estado: 'pendiente' });
+  } catch (err) {
+    console.error('[pagos/iniciar] error:', err);
+    res.status(500).json({ error: err.message || 'Error al iniciar el pago.' });
+  }
 });
 
 app.post('/api/pagos/webhook/paypal', express.json({ type: '*/*' }), (req, res) => {
@@ -288,25 +431,39 @@ app.post('/api/pagos/webhook/paypal', express.json({ type: '*/*' }), (req, res) 
   res.status(200).json({ recibido: true });
 });
 
-app.post('/api/pagos/confirmar', requireAuth, (req, res) => {
+app.post('/api/pagos/confirmar', requireAuth, async (req, res) => {
   const { plan } = req.body || {};
   if (!PLAN_PRICES[plan]) return res.status(400).json({ error: 'Plan inválido.' });
-  const resultado = activateOrganization(req.user.org, plan);
-  db.prepare(`
-    UPDATE transacciones SET estado = 'confirmada' WHERE organizacion_id = ? AND plan = ? AND estado = 'pendiente'
-  `).run(req.user.org, plan);
-  res.json(resultado);
+  try {
+    const resultado = await activateOrganization(req.user.org, plan);
+    await pool.query(
+      `UPDATE transacciones SET estado = 'confirmada' WHERE organizacion_id = $1 AND plan = $2 AND estado = 'pendiente'`,
+      [req.user.org, plan]
+    );
+    res.json(resultado);
+  } catch (err) {
+    console.error('[pagos/confirmar] error:', err);
+    res.status(500).json({ error: err.message || 'Error al confirmar el pago.' });
+  }
 });
 
 // =====================================================================
-// Tarea periódica real: revisa vencimientos cada 60 segundos
+// Arranque: primero crea/verifica las tablas en PostgreSQL, luego levanta el servidor
 // =====================================================================
-checkExpirations();
-setInterval(checkExpirations, 60 * 1000);
-
 const PORT = process.env.PORT || 4000;
-app.listen(PORT, () => {
-  console.log(`Fondos Sin Fronteras AI API escuchando en http://localhost:${PORT}`);
-});
+
+initDb()
+  .then(() => {
+    checkExpirations();
+    setInterval(checkExpirations, 60 * 1000);
+
+    app.listen(PORT, () => {
+      console.log(`Fondos Sin Fronteras AI API escuchando en http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error('No se pudo inicializar la base de datos PostgreSQL:', err);
+    process.exit(1);
+  });
 
 module.exports = app;
