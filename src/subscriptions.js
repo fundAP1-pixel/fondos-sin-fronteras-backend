@@ -1,4 +1,5 @@
 // subscriptions.js — Activación y suspensión REAL de suscripciones (basada en fechas, no en botones de demo)
+// Convertido a PostgreSQL: todas las funciones son async y usan pool.query con parámetros $1, $2...
 const { pool } = require('./db');
 
 const PLAN_DURATIONS = {
@@ -15,6 +16,10 @@ function addDuration(date, plan) {
   return d;
 }
 
+/**
+ * Activa el servicio de una organización de forma real: calcula fecha de inicio (ahora)
+ * y fecha de fin según el plan, y actualiza el estado a 'activo'.
+ */
 async function activateOrganization(orgId, plan) {
   const inicio = new Date();
   const fin = addDuration(inicio, plan);
@@ -34,25 +39,34 @@ async function activateOrganization(orgId, plan) {
   return { plan, estado: 'activo', inicio: inicio.toISOString(), fin: fin.toISOString() };
 }
 
+/**
+ * Revisa TODAS las organizaciones con suscripción activa y suspende automáticamente
+ * las que ya vencieron su fecha de fin. Se ejecuta en cada arranque del servidor,
+ * en cada consulta a /api/suscripcion, y además con un intervalo periódico (ver server.js).
+ */
 async function checkExpirations() {
   const now = new Date().toISOString();
-  const result = await pool.query(
+  const { rows: vencidas } = await pool.query(
     `SELECT id FROM organizaciones WHERE estado_suscripcion = 'activo' AND suscripcion_fin IS NOT NULL AND suscripcion_fin < $1`,
     [now]
   );
 
-  for (const row of result.rows) {
+  for (const row of vencidas) {
     await pool.query(`UPDATE organizaciones SET estado_suscripcion = 'suspendido' WHERE id = $1`, [row.id]);
     await pool.query(
       `INSERT INTO notificaciones (organizacion_id, tipo, texto) VALUES ($1, 'suspension', $2)`,
       [row.id, 'Tu suscripción venció y el servicio fue suspendido automáticamente. Renueva tu pago para reactivarlo.']
     );
   }
-  return result.rows.length;
+  return vencidas.length;
 }
 
+/** Marca una organización como pendiente de verificación (usado en transferencia bancaria y Nequi). */
 async function markPending(orgId, plan) {
-  await pool.query(`UPDATE organizaciones SET plan = $1, estado_suscripcion = 'pendiente' WHERE id = $2`, [plan, orgId]);
+  await pool.query(
+    `UPDATE organizaciones SET plan = $1, estado_suscripcion = 'pendiente' WHERE id = $2`,
+    [plan, orgId]
+  );
   await pool.query(
     `INSERT INTO notificaciones (organizacion_id, tipo, texto) VALUES ($1, 'pago', $2)`,
     [orgId, `Pago por transferencia notificado para el plan ${plan}. Verificaremos en menos de 24 horas.`]
