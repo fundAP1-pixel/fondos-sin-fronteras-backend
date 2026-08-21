@@ -4,7 +4,7 @@ const bcrypt = require('bcryptjs');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // necesario para Neon y Render Postgres
+  ssl: process.env.PGSSLMODE === 'disable' ? false : { rejectUnauthorized: false }, // necesario para Neon y Render Postgres
 });
 
 async function initDb() {
