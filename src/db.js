@@ -93,11 +93,22 @@ async function initDb() {
       creado_en TIMESTAMP NOT NULL DEFAULT now()
     );
 
-    CREATE TABLE IF NOT EXISTS uso_ia (
+   CREATE TABLE IF NOT EXISTS uso_ia (
       organizacion_id INTEGER NOT NULL REFERENCES organizaciones(id),
       mes TEXT NOT NULL,
       contador INTEGER NOT NULL DEFAULT 0,
       PRIMARY KEY (organizacion_id, mes)
+    );
+
+    CREATE TABLE IF NOT EXISTS contactos_crm (
+      id SERIAL PRIMARY KEY,
+      organizacion_id INTEGER NOT NULL REFERENCES organizaciones(id),
+      nombre TEXT NOT NULL,
+      tipo TEXT,
+      etapa TEXT NOT NULL DEFAULT 'prospecto',
+      nota TEXT,
+      creado_en TIMESTAMP NOT NULL DEFAULT now(),
+      actualizado_en TIMESTAMP NOT NULL DEFAULT now()
     );
   `);
 
