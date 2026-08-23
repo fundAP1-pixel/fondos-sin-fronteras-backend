@@ -43,4 +43,30 @@ function parsearJSON(texto) {
   }
 }
 
-module.exports = { getClient, extraerTexto, parsearJSON, ANTHROPIC_MODEL };
+/**
+ * Igual que parsearJSON, pero si el texto viene cortado a la mitad (respuesta truncada),
+ * intenta "cerrar" el JSON en el último objeto completo antes de rendirse.
+ * Así una búsqueda con 5 resultados completos y un 6º cortado no pierde los 5 buenos.
+ */
+function repararJSON(texto) {
+  const limpio = texto.replace(/```json|```/g, '').trim();
+  try {
+    return JSON.parse(limpio);
+  } catch (err) {
+    // Intento 1: cortar justo después del último objeto completo "},"
+    const idx1 = limpio.lastIndexOf('},');
+    if (idx1 !== -1) {
+      const intento = limpio.slice(0, idx1 + 1) + ']}';
+      try { return JSON.parse(intento); } catch (e2) { /* sigue al intento 2 */ }
+    }
+    // Intento 2: cortar en el último "}" que haya, por si solo hay un objeto
+    const idx2 = limpio.lastIndexOf('}');
+    if (idx2 !== -1) {
+      const intento2 = limpio.slice(0, idx2 + 1) + ']}';
+      try { return JSON.parse(intento2); } catch (e3) { /* sigue al error final */ }
+    }
+    throw new Error('La IA no devolvió un JSON válido ni siquiera recuperable parcialmente: ' + err.message);
+  }
+}
+
+module.exports = { getClient, extraerTexto, parsearJSON, repararJSON, ANTHROPIC_MODEL };
