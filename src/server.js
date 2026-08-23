@@ -4,10 +4,10 @@ const express = require('express');
 const cors = require('cors');
 const crypto = require('node:crypto');
 
-const { pool, bcrypt, initDb } = require('./db');
+const { pool, bcrypt, initDb, obtenerUsoIA, incrementarUsoIA } = require('./db');
 const { signToken, requireAuth } = require('./auth');
 const { activateOrganization, checkExpirations, markPending } = require('./subscriptions');
-const { getClient, extraerTexto, parsearJSON, ANTHROPIC_MODEL } = require('./claude');
+const { getClient, extraerTexto, repararJSON, ANTHROPIC_MODEL } = require('./claude');
 const { streamProjectPDF } = require('./pdf');
 
 const app = express();
@@ -15,6 +15,35 @@ app.use(cors());
 app.use(express.json());
 
 const PLAN_PRICES = { COOP: 97, PRO: 780, GOLD: 1550 };
+
+// Límites mensuales de uso de IA (SORY + buscador con IA, comparten el mismo contador).
+// Un plan que NO aparezca aquí (PRO, GOLD, Empresarial) se considera ILIMITADO.
+const LIMITES_PLAN_IA = { GRATIS: 5, COOP: 300 };
+
+/**
+ * Middleware: revisa si la organización ya alcanzó su límite mensual de IA según su plan.
+ * Si lo alcanzó, responde 429 sin gastar créditos de Anthropic. Si no, deja pasar.
+ */
+async function verificarLimiteIA(req, res, next) {
+  try {
+    const { rows } = await pool.query('SELECT plan FROM organizaciones WHERE id = $1', [req.user.org]);
+    const plan = rows[0] ? rows[0].plan : 'GRATIS';
+    const limite = LIMITES_PLAN_IA[plan]; // undefined = ilimitado
+    if (limite !== undefined) {
+      const usado = await obtenerUsoIA(req.user.org);
+      if (usado >= limite) {
+        return res.status(429).json({
+          limiteAlcanzado: true,
+          mensaje: 'Alcanzaste tu límite mensual de IA para tu plan. Mejora tu plan para seguir usando SORY.',
+        });
+      }
+    }
+    next();
+  } catch (err) {
+    console.error('[verificarLimiteIA] error:', err);
+    next(); // si falla el conteo, no bloqueamos al usuario por un problema nuestro
+  }
+}
 
 // Convierte una fila de convocatoria (requisitos/documentos guardados como texto JSON) a objeto listo para el frontend.
 function parseConvocatoria(r) {
@@ -35,7 +64,7 @@ app.get('/api/health', (req, res) => {
 // =====================================================================
 // SORY — chat real con Claude (no toca la base de datos)
 // =====================================================================
-app.post('/api/sory/chat', requireAuth, async (req, res) => {
+app.post('/api/sory/chat', requireAuth, verificarLimiteIA, async (req, res) => {
   const { mensaje, historial } = req.body || {};
   if (!mensaje || typeof mensaje !== 'string' || !mensaje.trim()) {
     return res.status(400).json({ error: 'Falta el campo "mensaje" (texto) en el cuerpo de la solicitud.' });
@@ -55,12 +84,14 @@ app.post('/api/sory/chat', requireAuth, async (req, res) => {
 
     const respuesta = await anthropic.messages.create({
       model: ANTHROPIC_MODEL,
-      max_tokens: 1024,
-      system: 'Eres SORY, la asistente de inteligencia artificial de Fondos Sin Fronteras AI. Ayudas a organizaciones sociales a formular proyectos y acceder a cooperación internacional. Respondes en español, de forma clara, honesta y práctica. Si no tienes información verificada sobre algo, lo dices explícitamente en vez de inventar datos.',
+      max_tokens: 1536,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      system: 'Eres SORY, la asistente de inteligencia artificial de Fondos Sin Fronteras AI. Ayudas a organizaciones sociales a formular proyectos y acceder a cooperación internacional. Respondes en español, de forma clara, honesta y práctica. Tienes acceso a búsqueda web: úsala cuando la pregunta necesite información actual, específica de un país, cifras recientes, normativas vigentes, organismos concretos o convocatorias puntuales — cita la fuente cuando la uses. Para preguntas conceptuales generales (qué es un marco lógico, cómo estructurar un presupuesto, etc.) puedes responder directamente desde tu conocimiento sin necesidad de buscar. Si no tienes información verificada sobre algo, lo dices explícitamente en vez de inventar datos.',
       messages,
     });
 
     const texto = extraerTexto(respuesta);
+    await incrementarUsoIA(req.user.org).catch((e) => console.error('[incrementarUsoIA sory] ', e));
     res.status(200).json({ respuesta: texto });
   } catch (err) {
     console.error('[sory/chat] error:', err);
@@ -71,7 +102,7 @@ app.post('/api/sory/chat', requireAuth, async (req, res) => {
 // =====================================================================
 // Búsqueda de convocatorias en tiempo real con IA + búsqueda web (no toca la base de datos)
 // =====================================================================
-app.post('/api/convocatorias/buscar-ia', requireAuth, async (req, res) => {
+app.post('/api/convocatorias/buscar-ia', requireAuth, verificarLimiteIA, async (req, res) => {
   const { consulta } = req.body || {};
   if (!consulta || typeof consulta !== 'string' || !consulta.trim()) {
     return res.status(400).json({ error: 'Falta el campo "consulta" (texto) en el cuerpo de la solicitud.' });
@@ -81,7 +112,7 @@ app.post('/api/convocatorias/buscar-ia', requireAuth, async (req, res) => {
 
     const respuesta = await anthropic.messages.create({
       model: ANTHROPIC_MODEL,
-      max_tokens: 1500,
+      max_tokens: 4096,
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       system: [
         'Eres un buscador de convocatorias, fondos y becas de cooperación internacional VIGENTES.',
@@ -91,21 +122,48 @@ app.post('/api/convocatorias/buscar-ia', requireAuth, async (req, res) => {
         '{ "resultados": [ { "nombre": "...", "cooperante": "...", "pais": "...", "sector": "...",',
         '"monto": "...", "fecha_cierre": "...", "resumen": "...", "url": "..." } ] }',
         'Máximo 6 resultados. Si no encuentras nada relevante o vigente, responde { "resultados": [] }.',
+        'Sé conciso en el campo "resumen" (máximo 2 frases) para no arriesgar cortar la respuesta.',
       ].join(' '),
       messages: [{ role: 'user', content: consulta }],
     });
 
     const texto = extraerTexto(respuesta);
-    const payload = parsearJSON(texto);
+    const payload = repararJSON(texto);
 
     if (!payload || !Array.isArray(payload.resultados)) {
       throw new Error('El JSON devuelto no tiene la forma esperada ({ "resultados": [...] }).');
     }
 
+    await incrementarUsoIA(req.user.org).catch((e) => console.error('[incrementarUsoIA buscar-ia] ', e));
     res.status(200).json(payload);
   } catch (err) {
     console.error('[convocatorias/buscar-ia] error:', err);
     res.status(500).json({ error: err.message || 'Error al buscar convocatorias con IA.' });
+  }
+});
+
+// =====================================================================
+// Guardar una convocatoria encontrada por IA en la base de datos compartida.
+// Queda visible para TODOS los usuarios, marcada como "pendiente_revision"
+// hasta que la administradora la revise y confirme.
+// =====================================================================
+app.post('/api/convocatorias/guardar-desde-ia', requireAuth, async (req, res) => {
+  const { nombre, cooperante, pais, sector, monto, fecha_cierre, resumen, url } = req.body || {};
+  if (!nombre || !cooperante) {
+    return res.status(400).json({ error: 'Faltan datos mínimos (nombre y cooperante) para guardar la convocatoria.' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO convocatorias
+        (nombre, cooperante, pais, sector, monto, fecha_inicio, fecha_cierre, descripcion, requisitos, documentos, tdr, url, estado_verificacion)
+       VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,'[]','[]',NULL,$8,'pendiente_revision')
+       RETURNING id`,
+      [nombre, cooperante, pais || null, sector || null, monto || null, fecha_cierre || null, resumen || null, url || null]
+    );
+    res.status(201).json({ ok: true, id: rows[0].id });
+  } catch (err) {
+    console.error('[convocatorias/guardar-desde-ia] error:', err);
+    res.status(500).json({ error: err.message || 'Error al guardar la convocatoria encontrada por IA.' });
   }
 });
 
@@ -169,7 +227,10 @@ app.get('/api/organizaciones/me', requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query('SELECT * FROM organizaciones WHERE id = $1', [req.user.org]);
     if (!rows[0]) return res.status(404).json({ error: 'Organización no encontrada.' });
-    res.json(rows[0]);
+    const org = rows[0];
+    const limite = LIMITES_PLAN_IA[org.plan]; // undefined = ilimitado
+    const usoIaActual = await obtenerUsoIA(org.id).catch(() => 0);
+    res.json({ ...org, usoIaActual, usoIaLimite: limite === undefined ? null : limite });
   } catch (err) {
     console.error('[organizaciones/me] error:', err);
     res.status(500).json({ error: err.message || 'Error al obtener la organización.' });
@@ -186,6 +247,7 @@ app.get('/api/convocatorias', async (req, res) => {
     );
     res.json(rows.map(parseConvocatoria));
   } catch (err) {
+    console.error('[convocatorias] error:', err);
     console.error('[convocatorias] error:', err);
     res.status(500).json({ error: err.message || 'Error al listar convocatorias.' });
   }
