@@ -166,6 +166,85 @@ app.post('/api/convocatorias/guardar-desde-ia', requireAuth, async (req, res) =>
     res.status(500).json({ error: err.message || 'Error al guardar la convocatoria encontrada por IA.' });
   }
 });
+// =====================================================================
+// CRM de donantes y aliados (real, ligado a la organización)
+// =====================================================================
+const ETAPAS_CRM = ['prospecto', 'en_conversacion', 'aliado_activo', 'convenio_firmado'];
+
+app.get('/api/crm/contactos', requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT * FROM contactos_crm WHERE organizacion_id = $1 ORDER BY actualizado_en DESC',
+      [req.user.org]
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('[crm/contactos GET] error:', err);
+    res.status(500).json({ error: err.message || 'Error al listar contactos del CRM.' });
+  }
+});
+
+app.post('/api/crm/contactos', requireAuth, async (req, res) => {
+  const { nombre, tipo, etapa, nota } = req.body || {};
+  if (!nombre || !nombre.trim()) {
+    return res.status(400).json({ error: 'El contacto necesita un nombre.' });
+  }
+  const etapaFinal = ETAPAS_CRM.includes(etapa) ? etapa : 'prospecto';
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO contactos_crm (organizacion_id, nombre, tipo, etapa, nota)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [req.user.org, nombre.trim(), tipo || null, etapaFinal, nota || null]
+    );
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error('[crm/contactos POST] error:', err);
+    res.status(500).json({ error: err.message || 'Error al crear el contacto.' });
+  }
+});
+
+app.patch('/api/crm/contactos/:id', requireAuth, async (req, res) => {
+  try {
+    const { rows: existentes } = await pool.query(
+      'SELECT id FROM contactos_crm WHERE id = $1 AND organizacion_id = $2',
+      [req.params.id, req.user.org]
+    );
+    if (!existentes[0]) return res.status(404).json({ error: 'Contacto no encontrado.' });
+
+    const campos = ['nombre', 'tipo', 'etapa', 'nota'];
+    const sets = [];
+    const vals = [];
+    let i = 1;
+    for (const c of campos) {
+      if (req.body[c] !== undefined) {
+        if (c === 'etapa' && !ETAPAS_CRM.includes(req.body.etapa)) continue;
+        sets.push(`${c} = $${i++}`);
+        vals.push(req.body[c]);
+      }
+    }
+    if (sets.length === 0) return res.status(400).json({ error: 'Nada que actualizar.' });
+    sets.push('actualizado_en = now()');
+    vals.push(req.params.id);
+    await pool.query(`UPDATE contactos_crm SET ${sets.join(', ')} WHERE id = $${i}`, vals);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[crm/contactos PATCH] error:', err);
+    res.status(500).json({ error: err.message || 'Error al actualizar el contacto.' });
+  }
+});
+
+app.delete('/api/crm/contactos/:id', requireAuth, async (req, res) => {
+  try {
+    await pool.query(
+      'DELETE FROM contactos_crm WHERE id = $1 AND organizacion_id = $2',
+      [req.params.id, req.user.org]
+    );
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[crm/contactos DELETE] error:', err);
+    res.status(500).json({ error: err.message || 'Error al eliminar el contacto.' });
+  }
+});
 
 // =====================================================================
 // Autenticación
