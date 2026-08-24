@@ -107,9 +107,12 @@ async function initDb() {
       tipo TEXT,
       etapa TEXT NOT NULL DEFAULT 'prospecto',
       nota TEXT,
+      proximo_seguimiento DATE,
       creado_en TIMESTAMP NOT NULL DEFAULT now(),
       actualizado_en TIMESTAMP NOT NULL DEFAULT now()
     );
+
+    ALTER TABLE contactos_crm ADD COLUMN IF NOT EXISTS proximo_seguimiento DATE;
   `);
 
   const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM convocatorias');
