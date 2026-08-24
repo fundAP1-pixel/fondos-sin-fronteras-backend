@@ -200,10 +200,10 @@ app.post('/api/crm/contactos', requireAuth, async (req, res) => {
   }
   const etapaFinal = ETAPAS_CRM.includes(etapa) ? etapa : 'prospecto';
   try {
-    const { rows } = await pool.query(
-      `INSERT INTO contactos_crm (organizacion_id, nombre, tipo, etapa, nota)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [req.user.org, nombre.trim(), tipo || null, etapaFinal, nota || null]
+  const { rows } = await pool.query(
+      `INSERT INTO contactos_crm (organizacion_id, nombre, tipo, etapa, nota, proximo_seguimiento)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [req.user.org, nombre.trim(), tipo || null, etapaFinal, nota || null, req.body.proximo_seguimiento || null]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -220,7 +220,7 @@ app.patch('/api/crm/contactos/:id', requireAuth, async (req, res) => {
     );
     if (!existentes[0]) return res.status(404).json({ error: 'Contacto no encontrado.' });
 
-    const campos = ['nombre', 'tipo', 'etapa', 'nota'];
+    const campos = ['nombre', 'tipo', 'etapa', 'nota', 'proximo_seguimiento'];
     const sets = [];
     const vals = [];
     let i = 1;
