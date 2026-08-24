@@ -15,7 +15,17 @@ app.use(cors());
 app.use(express.json());
 
 const PLAN_PRICES = { COOP: 97, PRO: 780, GOLD: 1550 };
+const PLAN_PRICES = { COOP: 97, PRO: 780, GOLD: 1550 };
 
+// Correos autorizados como administradores de la plataforma (no de una fundación, sino del sistema completo).
+const SUPERADMIN_EMAILS = ['fundap1@outlook.com'];
+
+function requireSuperAdmin(req, res, next) {
+  if (!req.user || !req.user.email || !SUPERADMIN_EMAILS.includes(req.user.email.toLowerCase())) {
+    return res.status(403).json({ error: 'No tienes permisos de administradora de la plataforma.' });
+  }
+  next();
+}
 // Límites mensuales de uso de IA (SORY + buscador con IA, comparten el mismo contador).
 // Un plan que NO aparezca aquí (PRO, GOLD, Empresarial) se considera ILIMITADO.
 const LIMITES_PLAN_IA = { GRATIS: 15, COOP: 300 };
