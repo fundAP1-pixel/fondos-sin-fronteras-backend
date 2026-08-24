@@ -17,7 +17,7 @@ app.use(express.json());
 const PLAN_PRICES = { COOP: 97, PRO: 780, GOLD: 1550 };
 
 // Correos autorizados como administradores de la plataforma (no de una fundación, sino del sistema completo).
-const SUPERADMIN_EMAILS = ['fundap1@outlook.com'];
+const SUPERADMIN_EMAILS = ['aldijuntos@hotmail.com'];
 
 function requireSuperAdmin(req, res, next) {
   if (!req.user || !req.user.email || !SUPERADMIN_EMAILS.includes(req.user.email.toLowerCase())) {
