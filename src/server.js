@@ -254,6 +254,66 @@ app.delete('/api/crm/contactos/:id', requireAuth, async (req, res) => {
     res.status(500).json({ error: err.message || 'Error al eliminar el contacto.' });
   }
 });
+// =====================================================================
+// Panel de administradora de la plataforma (solo SUPERADMIN_EMAILS)
+// =====================================================================
+app.get('/api/admin/convocatorias-pendientes', requireAuth, requireSuperAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT * FROM convocatorias WHERE estado_verificacion = 'pendiente_revision' ORDER BY creado_en DESC"
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('[admin/convocatorias-pendientes] error:', err);
+    res.status(500).json({ error: err.message || 'Error al listar convocatorias pendientes.' });
+  }
+});
+
+app.post('/api/admin/convocatorias/:id/aprobar', requireAuth, requireSuperAdmin, async (req, res) => {
+  try {
+    await pool.query("UPDATE convocatorias SET estado_verificacion = 'verificada' WHERE id = $1", [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin/convocatorias/:id/aprobar] error:', err);
+    res.status(500).json({ error: err.message || 'Error al aprobar la convocatoria.' });
+  }
+});
+
+app.delete('/api/admin/convocatorias/:id', requireAuth, requireSuperAdmin, async (req, res) => {
+  try {
+    await pool.query('DELETE FROM convocatorias WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin/convocatorias/:id DELETE] error:', err);
+    res.status(500).json({ error: err.message || 'Error al eliminar la convocatoria.' });
+  }
+});
+
+app.post('/api/admin/convocatorias', requireAuth, requireSuperAdmin, async (req, res) => {
+  const { nombre, cooperante, pais, sector, monto, fecha_inicio, fecha_cierre, descripcion, requisitos, documentos, tdr, url } = req.body || {};
+  if (!nombre || !cooperante) {
+    return res.status(400).json({ error: 'Faltan datos mínimos (nombre y cooperante).' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO convocatorias
+        (nombre, cooperante, pais, sector, monto, fecha_inicio, fecha_cierre, descripcion, requisitos, documentos, tdr, url, estado_verificacion)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'verificada')
+       RETURNING id`,
+      [
+        nombre, cooperante, pais || null, sector || null, monto || null,
+        fecha_inicio || null, fecha_cierre || null, descripcion || null,
+        JSON.stringify(requisitos ? requisitos.split('\n').filter(Boolean) : []),
+        JSON.stringify(documentos ? documentos.split('\n').filter(Boolean) : []),
+        tdr || null, url || null,
+      ]
+    );
+    res.status(201).json({ ok: true, id: rows[0].id });
+  } catch (err) {
+    console.error('[admin/convocatorias POST] error:', err);
+    res.status(500).json({ error: err.message || 'Error al crear la convocatoria.' });
+  }
+});
 
 // =====================================================================
 // Autenticación
