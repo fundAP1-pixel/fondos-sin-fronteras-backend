@@ -18,7 +18,7 @@ const PLAN_PRICES = { COOP: 97, PRO: 780, GOLD: 1550 };
 
 // Límites mensuales de uso de IA (SORY + buscador con IA, comparten el mismo contador).
 // Un plan que NO aparezca aquí (PRO, GOLD, Empresarial) se considera ILIMITADO.
-const LIMITES_PLAN_IA = { GRATIS: 5, COOP: 300 };
+const LIMITES_PLAN_IA = { GRATIS: 15, COOP: 300 };
 
 /**
  * Middleware: revisa si la organización ya alcanzó su límite mensual de IA según su plan.
