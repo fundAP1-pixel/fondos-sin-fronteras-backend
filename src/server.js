@@ -147,6 +147,14 @@ app.post('/api/convocatorias/buscar-ia', requireAuth, verificarLimiteIA, async (
     res.status(200).json(payload);
   } catch (err) {
     console.error('[convocatorias/buscar-ia] error:', err);
+    // Si el error viene directo de la API de Anthropic por límite de uso/gasto alcanzado,
+    // devolvemos un mensaje claro en vez del texto crudo del error (que confunde con un
+    // problema de JSON cuando en realidad es un límite temporal de la cuenta).
+    if (err && err.error && err.error.type === 'rate_limit_error') {
+      return res.status(429).json({
+        error: 'La cuenta de IA alcanzó su límite de uso mensual. Vuelve a intentar más tarde o contacta al administrador de la plataforma para ampliar el límite.',
+      });
+    }
     res.status(500).json({ error: err.message || 'Error al buscar convocatorias con IA.' });
   }
 });
