@@ -35,9 +35,13 @@ const LIMITES_PLAN_IA = { GRATIS: 15, COOP: 300 };
  */
 async function verificarLimiteIA(req, res, next) {
   try {
+    if (req.user && req.user.email && SUPERADMIN_EMAILS.includes(req.user.email.toLowerCase())) {
+      return next(); // la administradora de la plataforma nunca tiene límite
+    }
     const { rows } = await pool.query('SELECT plan FROM organizaciones WHERE id = $1', [req.user.org]);
     const plan = rows[0] ? rows[0].plan : 'GRATIS';
     const limite = LIMITES_PLAN_IA[plan]; // undefined = ilimitado
+
     if (limite !== undefined) {
       const usado = await obtenerUsoIA(req.user.org);
       if (usado >= limite) {
