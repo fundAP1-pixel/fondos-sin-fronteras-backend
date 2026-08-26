@@ -24,13 +24,25 @@ function getClient() {
   return cliente;
 }
 
-/** Extrae el primer bloque de texto de una respuesta de la API de Anthropic. */
+/**
+ * Extrae el texto final de una respuesta de la API de Anthropic.
+ *
+ * Cuando la respuesta usa la herramienta de búsqueda web (web_search_20250305),
+ * Anthropic puede devolver VARIOS bloques de tipo "text" en el mismo mensaje:
+ * un texto inicial/comentario antes o durante la búsqueda, y el texto final
+ * con la respuesta ya sintetizada después de buscar. Tomar el PRIMER bloque
+ * (como se hacía antes) agarra ese comentario intermedio en vez del JSON final,
+ * lo que producía errores como "Unexpected token 'I', "I have eno"...".
+ *
+ * Por eso aquí se toma el ÚLTIMO bloque de texto, que es el que contiene la
+ * respuesta definitiva del modelo tras completar la búsqueda.
+ */
 function extraerTexto(respuesta) {
-  const bloque = respuesta.content.find((b) => b.type === 'text');
-  if (!bloque || !bloque.text) {
+  const bloques = respuesta.content.filter((b) => b.type === 'text' && b.text);
+  if (bloques.length === 0) {
     throw new Error('La IA no devolvió una respuesta de texto.');
   }
-  return bloque.text;
+  return bloques[bloques.length - 1].text;
 }
 
 /** Convierte el texto de respuesta en JSON, quitando los backticks ```json si vienen. */
@@ -53,17 +65,26 @@ function repararJSON(texto) {
   try {
     return JSON.parse(limpio);
   } catch (err) {
-    // Intento 1: cortar justo después del último objeto completo "},"
-    const idx1 = limpio.lastIndexOf('},');
-    if (idx1 !== -1) {
-      const intento = limpio.slice(0, idx1 + 1) + ']}';
-      try { return JSON.parse(intento); } catch (e2) { /* sigue al intento 2 */ }
-    }
-    // Intento 2: cortar en el último "}" que haya, por si solo hay un objeto
-    const idx2 = limpio.lastIndexOf('}');
-    if (idx2 !== -1) {
-      const intento2 = limpio.slice(0, idx2 + 1) + ']}';
-      try { return JSON.parse(intento2); } catch (e3) { /* sigue al error final */ }
+    // Intento 1: quedarnos solo con lo que hay entre la primera "{" y la última "}",
+    // por si quedó texto de comentario pegado antes o después del JSON real.
+    const inicio = limpio.indexOf('{');
+    const fin = limpio.lastIndexOf('}');
+    if (inicio !== -1 && fin !== -1 && fin > inicio) {
+      const soloJSON = limpio.slice(inicio, fin + 1);
+      try { return JSON.parse(soloJSON); } catch (e1) { /* sigue al intento 2 */ }
+
+      // Intento 2: dentro de ese recorte, cortar justo después del último objeto completo "},"
+      const idx1 = soloJSON.lastIndexOf('},');
+      if (idx1 !== -1) {
+        const intento = soloJSON.slice(0, idx1 + 1) + ']}';
+        try { return JSON.parse(intento); } catch (e2) { /* sigue al intento 3 */ }
+      }
+      // Intento 3: cortar en el último "}" que haya, por si solo hay un objeto
+      const idx2 = soloJSON.lastIndexOf('}');
+      if (idx2 !== -1) {
+        const intento2 = soloJSON.slice(0, idx2 + 1) + ']}';
+        try { return JSON.parse(intento2); } catch (e3) { /* sigue al error final */ }
+      }
     }
     throw new Error('La IA no devolvió un JSON válido ni siquiera recuperable parcialmente: ' + err.message);
   }
