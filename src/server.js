@@ -78,7 +78,7 @@ app.get('/api/health', (req, res) => {
 // SORY — chat real con Claude (no toca la base de datos)
 // =====================================================================
 app.post('/api/sory/chat', requireAuth, verificarLimiteIA, async (req, res) => {
-  const { mensaje, historial } = req.body || {};
+  const { mensaje, historial, contexto } = req.body || {};
   if (!mensaje || typeof mensaje !== 'string' || !mensaje.trim()) {
     return res.status(400).json({ error: 'Falta el campo "mensaje" (texto) en el cuerpo de la solicitud.' });
   }
@@ -93,13 +93,32 @@ app.post('/api/sory/chat', requireAuth, verificarLimiteIA, async (req, res) => {
         }
       }
     }
-    messages.push({ role: 'user', content: mensaje });
+
+    // Si el mensaje viene con el contexto de una convocatoria específica (por ejemplo, desde
+    // el botón "Formular proyecto" de una tarjeta), se lo añadimos al mensaje del usuario para
+    // que el proyecto generado quede realmente ajustado a esa convocatoria, no genérico.
+    let mensajeFinal = mensaje;
+    const conv = contexto && contexto.convocatoria;
+    if (conv && (conv.nombre || conv.cooperante)) {
+      const detalles = [
+        conv.nombre ? `Convocatoria: ${conv.nombre}` : null,
+        conv.cooperante ? `Cooperante: ${conv.cooperante}` : null,
+        conv.pais ? `País: ${conv.pais}` : null,
+        conv.sector ? `Sector: ${conv.sector}` : null,
+        conv.monto ? `Monto: ${conv.monto}` : null,
+        conv.descripcion ? `Descripción oficial: ${conv.descripcion}` : null,
+        conv.requisitos ? `Requisitos: ${Array.isArray(conv.requisitos) ? conv.requisitos.join('; ') : conv.requisitos}` : null,
+      ].filter(Boolean).join('\n');
+      mensajeFinal = `El proyecto debe formularse específicamente para esta convocatoria (ajusta el enfoque, el sector y el monto del presupuesto a lo que ella pide):\n${detalles}\n\n${mensaje}`;
+    }
+
+    messages.push({ role: 'user', content: mensajeFinal });
 
     const respuesta = await anthropic.messages.create({
       model: ANTHROPIC_MODEL,
       max_tokens: 1536,
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
-      system: 'Eres SORY, la asistente de inteligencia artificial de Fondos Sin Fronteras AI. Ayudas a organizaciones sociales a formular proyectos y acceder a cooperación internacional. Respondes en español, de forma clara, honesta y práctica. Tienes acceso a búsqueda web: úsala cuando la pregunta necesite información actual, específica de un país, cifras recientes, normativas vigentes, organismos concretos o convocatorias puntuales — cita la fuente cuando la uses. Para preguntas conceptuales generales (qué es un marco lógico, cómo estructurar un presupuesto, etc.) puedes responder directamente desde tu conocimiento sin necesidad de buscar. Si no tienes información verificada sobre algo, lo dices explícitamente en vez de inventar datos.',
+      system: 'Eres SORY, la asistente de inteligencia artificial de Fondos Sin Fronteras AI. Ayudas a organizaciones sociales a formular proyectos y acceder a cooperación internacional. Respondes en español, de forma clara, honesta y práctica. Tienes acceso a búsqueda web: úsala cuando la pregunta necesite información actual, específica de un país, cifras recientes, normativas vigentes, organismos concretos o convocatorias puntuales — cita la fuente cuando la uses. Para preguntas conceptuales generales (qué es un marco lógico, cómo estructurar un presupuesto, etc.) puedes responder directamente desde tu conocimiento sin necesidad de buscar. Si te dan el contexto de una convocatoria específica, ajusta el proyecto a sus requisitos, sector y monto reales — no generes algo genérico. Si no tienes información verificada sobre algo, lo dices explícitamente en vez de inventar datos.',
       messages,
     });
 
