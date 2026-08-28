@@ -29,8 +29,10 @@ async function initDb() {
       email TEXT NOT NULL UNIQUE,
       password_hash TEXT NOT NULL,
       rol TEXT NOT NULL DEFAULT 'administrador',
+      suspendido BOOLEAN NOT NULL DEFAULT false,
       creado_en TIMESTAMP NOT NULL DEFAULT now()
     );
+    ALTER TABLE usuarios ADD COLUMN IF NOT EXISTS suspendido BOOLEAN NOT NULL DEFAULT false;
 
     CREATE TABLE IF NOT EXISTS convocatorias (
       id SERIAL PRIMARY KEY,
