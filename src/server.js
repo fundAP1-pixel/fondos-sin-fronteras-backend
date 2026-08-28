@@ -328,6 +328,67 @@ app.post('/api/admin/convocatorias', requireAuth, requireSuperAdmin, async (req,
 });
 
 // =====================================================================
+// Gestión de usuarios registrados (solo SUPERADMIN_EMAILS)
+// =====================================================================
+app.get('/api/admin/usuarios', requireAuth, requireSuperAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT u.id, u.nombre, u.email, u.rol, u.suspendido, u.creado_en,
+              o.id AS organizacion_id, o.nombre AS organizacion_nombre, o.plan, o.estado_suscripcion
+       FROM usuarios u
+       JOIN organizaciones o ON o.id = u.organizacion_id
+       ORDER BY u.creado_en DESC`
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('[admin/usuarios GET] error:', err);
+    res.status(500).json({ error: err.message || 'Error al listar usuarios.' });
+  }
+});
+
+app.post('/api/admin/usuarios/:id/suspender', requireAuth, requireSuperAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT email FROM usuarios WHERE id = $1', [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado.' });
+    if (SUPERADMIN_EMAILS.includes(rows[0].email.toLowerCase())) {
+      return res.status(403).json({ error: 'No se puede suspender a una administradora de la plataforma.' });
+    }
+    await pool.query('UPDATE usuarios SET suspendido = true WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin/usuarios/:id/suspender] error:', err);
+    res.status(500).json({ error: err.message || 'Error al suspender el usuario.' });
+  }
+});
+
+app.post('/api/admin/usuarios/:id/reactivar', requireAuth, requireSuperAdmin, async (req, res) => {
+  try {
+    await pool.query('UPDATE usuarios SET suspendido = false WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin/usuarios/:id/reactivar] error:', err);
+    res.status(500).json({ error: err.message || 'Error al reactivar el usuario.' });
+  }
+});
+
+app.delete('/api/admin/usuarios/:id', requireAuth, requireSuperAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT email FROM usuarios WHERE id = $1', [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado.' });
+    if (SUPERADMIN_EMAILS.includes(rows[0].email.toLowerCase())) {
+      return res.status(403).json({ error: 'No se puede eliminar a una administradora de la plataforma.' });
+    }
+    // Primero borramos sus favoritos (tienen una llave foránea hacia usuarios) para que el borrado no falle.
+    await pool.query('DELETE FROM favoritos WHERE usuario_id = $1', [req.params.id]);
+    await pool.query('DELETE FROM usuarios WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[admin/usuarios/:id DELETE] error:', err);
+    res.status(500).json({ error: err.message || 'Error al eliminar el usuario.' });
+  }
+});
+
+// =====================================================================
 // Autenticación
 // =====================================================================
 app.post('/api/auth/registro', async (req, res) => {
@@ -371,6 +432,9 @@ app.post('/api/auth/login', async (req, res) => {
     const usuario = rows[0];
     if (!usuario || !bcrypt.compareSync(password || '', usuario.password_hash)) {
       return res.status(401).json({ error: 'Correo o contraseña incorrectos.' });
+    }
+    if (usuario.suspendido) {
+      return res.status(403).json({ error: 'Tu cuenta ha sido suspendida. Contacta al administrador de la plataforma.' });
     }
     const token = signToken(usuario);
     res.json({ token, organizacionId: usuario.organizacion_id, usuarioId: usuario.id });
