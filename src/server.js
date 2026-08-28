@@ -339,7 +339,11 @@ app.get('/api/admin/usuarios', requireAuth, requireSuperAdmin, async (req, res) 
        JOIN organizaciones o ON o.id = u.organizacion_id
        ORDER BY u.creado_en DESC`
     );
-    res.json(rows);
+    // Marcamos cuáles cuentas son administradoras de la plataforma, para que el frontend
+    // pueda ocultar los botones de suspender/eliminar en esas filas (no solo bloquearlo
+    // al hacer clic, sino no ofrecer la opción en absoluto).
+    const usuarios = rows.map(u => ({ ...u, esSuperadmin: SUPERADMIN_EMAILS.includes(u.email.toLowerCase()) }));
+    res.json(usuarios);
   } catch (err) {
     console.error('[admin/usuarios GET] error:', err);
     res.status(500).json({ error: err.message || 'Error al listar usuarios.' });
