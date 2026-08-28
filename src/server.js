@@ -301,6 +301,48 @@ app.delete('/api/admin/convocatorias/:id', requireAuth, requireSuperAdmin, async
   }
 });
 
+// =====================================================================
+// Extraer los datos de una convocatoria a partir de un enlace (solo SUPERADMIN)
+// La IA visita la URL y devuelve los campos ya organizados, listos para revisar
+// antes de guardarlos — no se publica nada automáticamente.
+// =====================================================================
+app.post('/api/admin/convocatorias/extraer-de-link', requireAuth, requireSuperAdmin, async (req, res) => {
+  const { url } = req.body || {};
+  if (!url || typeof url !== 'string' || !url.trim()) {
+    return res.status(400).json({ error: 'Falta el campo "url".' });
+  }
+  try {
+    const anthropic = getClient();
+    const respuesta = await anthropic.messages.create({
+      model: ANTHROPIC_MODEL,
+      max_tokens: 2048,
+      tools: [{ type: 'web_search_20250305', name: 'web_search' }],
+      system: [
+        'Visita la URL exacta que te dan y extrae los datos de la convocatoria de cooperación internacional que contiene.',
+        'Responde ÚNICAMENTE con un JSON válido, sin texto adicional antes o después, exactamente con esta forma:',
+        '{ "nombre": "...", "cooperante": "...", "pais": "...", "sector": "...", "monto": "...",',
+        '"fecha_inicio": "AAAA-MM-DD o null si no aparece", "fecha_cierre": "AAAA-MM-DD o null si no aparece",',
+        '"descripcion": "...", "requisitos": ["...", "..."], "documentos": ["...", "..."], "tdr": "..." }',
+        'Si no logras acceder a la página o no encuentras información suficiente para identificar una convocatoria real,',
+        'responde exactamente { "error": "no se pudo extraer" } y nada más.',
+      ].join(' '),
+      messages: [{ role: 'user', content: `Extrae los datos de la convocatoria en esta URL: ${url.trim()}` }],
+    });
+
+    const texto = extraerTexto(respuesta);
+    const payload = repararJSON(texto);
+
+    if (!payload || payload.error) {
+      return res.status(422).json({ error: 'No se pudo extraer información de ese enlace. Intenta agregarla manualmente.' });
+    }
+    payload.url = url.trim();
+    res.status(200).json(payload);
+  } catch (err) {
+    console.error('[admin/convocatorias/extraer-de-link] error:', err);
+    res.status(500).json({ error: err.message || 'Error al extraer la convocatoria del enlace.' });
+  }
+});
+
 app.post('/api/admin/convocatorias', requireAuth, requireSuperAdmin, async (req, res) => {
   const { nombre, cooperante, pais, sector, monto, fecha_inicio, fecha_cierre, descripcion, requisitos, documentos, tdr, url } = req.body || {};
   if (!nombre || !cooperante) {
