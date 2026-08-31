@@ -114,9 +114,15 @@ app.post('/api/sory/chat', requireAuth, verificarLimiteIA, async (req, res) => {
 
     messages.push({ role: 'user', content: mensajeFinal });
 
+    // Cuando es una generación de proyecto completo para el Constructor (se reconoce porque
+    // el mensaje pide las secciones con las marcas ###...###), le damos mucho más espacio de
+    // respuesta que a una pregunta normal de chat, para que el borrador salga realmente completo.
+    const esGeneracionDeProyecto = mensajeFinal.includes('###DIAGNOSTICO###');
+    const limiteTokens = esGeneracionDeProyecto ? 8192 : 1536;
+
     const respuesta = await anthropic.messages.create({
       model: ANTHROPIC_MODEL,
-      max_tokens: 1536,
+      max_tokens: limiteTokens,
       tools: [{ type: 'web_search_20250305', name: 'web_search' }],
       system: 'Eres SORY, la asistente de inteligencia artificial de Fondos Sin Fronteras AI. Ayudas a organizaciones sociales a formular proyectos y acceder a cooperación internacional. Respondes en español, de forma clara, honesta y práctica. Tienes acceso a búsqueda web: úsala cuando la pregunta necesite información actual, específica de un país, cifras recientes, normativas vigentes, organismos concretos o convocatorias puntuales — cita la fuente cuando la uses. Para preguntas conceptuales generales (qué es un marco lógico, cómo estructurar un presupuesto, etc.) puedes responder directamente desde tu conocimiento sin necesidad de buscar. Si te dan el contexto de una convocatoria específica, ajusta el proyecto a sus requisitos, sector y monto reales — no generes algo genérico. Si no tienes información verificada sobre algo, lo dices explícitamente en vez de inventar datos.',
       messages,
