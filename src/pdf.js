@@ -29,8 +29,11 @@ function streamProjectPDF(res, proyecto, organizacion) {
     doc.font('Helvetica').fontSize(10.5).fillColor('#222222');
   }
 
-  section('Diagnóstico y objetivo general');
-  doc.text(proyecto.objetivo_general || proyecto.diagnostico || 'No definido.');
+  section('Diagnóstico');
+  doc.text(proyecto.diagnostico || 'No definido.');
+
+  section('Objetivo general');
+  doc.text(proyecto.objetivo_general || 'No definido.');
 
   const objetivos = JSON.parse(proyecto.objetivos_especificos || '[]');
   if (objetivos.length) {
